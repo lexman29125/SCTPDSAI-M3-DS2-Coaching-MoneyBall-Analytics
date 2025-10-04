@@ -6,14 +6,8 @@ import math
 import matplotlib.pyplot as plt
 from datetime import datetime
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
-import lightgbm as lgb
-# --- Additional imports for stacking and tuning ---
-from catboost import CatBoostRegressor
-from sklearn.model_selection import KFold, cross_val_predict
-import optuna
-from sklearn.ensemble import StackingRegressor
 
 def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     # Load data
@@ -21,39 +15,6 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     train = pd.read_csv(train_path)
     print(f"Loading test data from: {test_path}")
     test = pd.read_csv(test_path)
-
-    # --- Add rolling lag features: rolling mean of W, R, RA over previous 2 seasons for each teamID ---
-    if 'yearID' in train.columns and 'teamID' in train.columns:
-        train = train.sort_values(['teamID', 'yearID'])
-        # Rolling mean over previous 2 seasons (lags 1 and 2)
-        train['W_lag2_mean'] = train.groupby('teamID')['W'].transform(lambda x: x.shift(1).rolling(2, min_periods=1).mean())
-        train['R_lag2_mean'] = train.groupby('teamID')['R'].transform(lambda x: x.shift(1).rolling(2, min_periods=1).mean())
-        train['RA_lag2_mean'] = train.groupby('teamID')['RA'].transform(lambda x: x.shift(1).rolling(2, min_periods=1).mean())
-        train['W_lag2_mean'] = train['W_lag2_mean'].fillna(0)
-        train['R_lag2_mean'] = train['R_lag2_mean'].fillna(0)
-        train['RA_lag2_mean'] = train['RA_lag2_mean'].fillna(0)
-    else:
-        train['W_lag2_mean'] = 0
-        train['R_lag2_mean'] = 0
-        train['RA_lag2_mean'] = 0
-
-    # For test: merge rolling lag features from train, aligned by teamID and yearID
-    if 'yearID' in test.columns and 'teamID' in test.columns:
-        # Prepare rolling lag features from train, shift yearID by +1 (so that for test year, lag is from previous train years)
-        lag2_df = train[['teamID', 'yearID', 'W_lag2_mean', 'R_lag2_mean', 'RA_lag2_mean']].copy()
-        lag2_df['yearID'] += 1
-        test = test.merge(
-            lag2_df,
-            on=['teamID', 'yearID'],
-            how='left'
-        )
-        test['W_lag2_mean'] = test['W_lag2_mean'].fillna(0)
-        test['R_lag2_mean'] = test['R_lag2_mean'].fillna(0)
-        test['RA_lag2_mean'] = test['RA_lag2_mean'].fillna(0)
-    else:
-        test['W_lag2_mean'] = 0
-        test['R_lag2_mean'] = 0
-        test['RA_lag2_mean'] = 0
 
     print(f"Number of rows in train: {len(train)}")
     print(f"Number of rows in test: {len(test)}")
@@ -254,34 +215,24 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     print(f"Linear Regression training RMSE: {rmse:.4f}")
     print(f"Linear Regression training R^2: {r2:.4f}")
 
-    # Create timestamped output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    submission_dir = os.path.join('submission', timestamp)
-    os.makedirs(submission_dir, exist_ok=True)
-
-    # Feature importance from Linear Regression coefficients
+    # Feature importance from coefficients
     coef_df = pd.DataFrame({
         'feature': available_features,
         'coefficient': lr.coef_
     })
     coef_df['abs_coefficient'] = coef_df['coefficient'].abs()
     coef_df = coef_df.sort_values(by='abs_coefficient', ascending=False)
-    print("Top 10 features by absolute coefficient (Linear Regression):")
+    print("Top 10 features by absolute coefficient:")
     print(coef_df.head(10)[['feature', 'coefficient']])
-
-    # Save all feature importances (coefficients) to CSV
-    feature_importances_path = os.path.join(submission_dir, 'feature_importances.csv')
-    coef_df[['feature', 'coefficient']].to_csv(feature_importances_path, index=False)
-    print(f"Saved all feature importances to: {feature_importances_path}")
-
-    # Save top 10 coefficients to CSV
-    top_10_path = os.path.join(submission_dir, 'top_10_coefficients.csv')
-    coef_df.head(10)[['feature', 'coefficient']].to_csv(top_10_path, index=False)
-    print(f"Saved top 10 coefficients to: {top_10_path}")
 
     # Clip predictions to reasonable bounds
     test_preds_rounded = np.round(test_preds).astype(int)
     test_preds_rounded = np.clip(test_preds_rounded, 40, 120)
+
+    # Create timestamped output directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    submission_dir = os.path.join('submission', timestamp)
+    os.makedirs(submission_dir, exist_ok=True)
 
     # Save training predictions (OOF not applicable here, so save train preds)
     oof_df = train[['yearID']].copy() if 'yearID' in train.columns else pd.DataFrame(index=train.index)
@@ -332,172 +283,6 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     print(f"Saved submission file to: {submission_path}")
 
     print("Linear Regression pipeline finished successfully. Output files are saved.")
-
-    # --- Additional steps for Ridge and LightGBM feature importance and retraining ---
-
-    # Train Ridge regression on all features
-    ridge = Ridge(alpha=1.0, random_state=42)
-    ridge.fit(X_train_scaled, y_train)
-    ridge_coefs = np.abs(ridge.coef_)
-
-    # Train LightGBM regressor on all features
-    lgb_train = lgb.Dataset(X_train_scaled, label=y_train)
-    params = {
-        'objective': 'regression',
-        'metric': 'l2',
-        'verbosity': -1,  # Suppress warnings
-        'seed': 42,
-        'force_row_wise': True  # For warning suppression and compatibility
-    }
-    # Suppress LightGBM terminal warnings
-    try:
-        with lgb.basic.silent():
-            lgb_model = lgb.train(params, lgb_train, num_boost_round=100)
-    except AttributeError:
-        # For older LightGBM versions, fallback to direct call
-        lgb_model = lgb.train(params, lgb_train, num_boost_round=100)
-    lgb_importance = lgb_model.feature_importance(importance_type='gain')
-    lgb_features = X_train_scaled.columns
-
-    # Create DataFrame for feature importances
-    ridge_imp_df = pd.DataFrame({'feature': X_train_scaled.columns, 'ridge_importance': ridge_coefs})
-    lgb_imp_df = pd.DataFrame({'feature': lgb_features, 'lgb_importance': lgb_importance})
-
-    # Merge importances
-    combined_imp_df = pd.merge(ridge_imp_df, lgb_imp_df, on='feature', how='inner')
-
-    # Normalize importances
-    combined_imp_df['ridge_norm'] = combined_imp_df['ridge_importance'] / combined_imp_df['ridge_importance'].max()
-    combined_imp_df['lgb_norm'] = combined_imp_df['lgb_importance'] / combined_imp_df['lgb_importance'].max()
-
-    # Combined score as sum of normalized importances
-    combined_imp_df['combined_score'] = combined_imp_df['ridge_norm'] + combined_imp_df['lgb_norm']
-
-    # Sort by combined score descending
-    combined_imp_df = combined_imp_df.sort_values(by='combined_score', ascending=False)
-
-    # Select top 12-15 features (choose 15)
-    top_features_count = 15
-    top_features = combined_imp_df.head(top_features_count)['feature'].tolist()
-
-    # Save combined top features to CSV
-    top_features_path = os.path.join(submission_dir, 'top_features_combined.csv')
-    combined_imp_df.head(top_features_count)[['feature', 'combined_score']].to_csv(top_features_path, index=False)
-    print(f"Saved combined top features to: {top_features_path}")
-
-    # Prepare data with top features only
-    X_train_top = X_train_scaled[top_features]
-    X_test_top = X_test_scaled[top_features]
-
-
-    # --- Scale lag and interaction features before stacking ---
-    # Identify lag and interaction features
-    lag_interaction_cols = [col for col in X_train_top.columns if 'lag' in col or 'RD' in col or 'Pythag' in col]
-    if lag_interaction_cols:
-        scaler_lag = StandardScaler()
-        X_train_top[lag_interaction_cols] = scaler_lag.fit_transform(X_train_top[lag_interaction_cols])
-        X_test_top[lag_interaction_cols] = scaler_lag.transform(X_test_top[lag_interaction_cols])
-    else:
-        print("No lag or interaction features found to scale.")
-
-    # --- Define Optuna tuning functions ---
-    def tune_ridge(X, y, n_trials=20):
-        def objective(trial):
-            alpha = trial.suggest_loguniform('alpha', 1e-3, 10)
-            model = Ridge(alpha=alpha, random_state=42)
-            scores = cross_val_predict(model, X, y, cv=5, method='predict')
-            return mean_absolute_error(y, scores)
-        study = optuna.create_study(direction='minimize')
-        study.optimize(objective, n_trials=n_trials)
-        return study.best_params['alpha']
-
-    def tune_lgb(X, y, n_trials=20):
-        def objective(trial):
-            param = {
-                'objective': 'regression',
-                'metric': 'mae',
-                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-                'num_leaves': trial.suggest_int('num_leaves', 15, 255),
-                'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 10, 100),
-                'verbosity': -1,
-                'seed': 42
-            }
-            cv_results = lgb.cv(
-                param,
-                lgb.Dataset(X, label=y),
-                nfold=5,
-                metrics='mae',
-                seed=42,
-                stratified=False
-            )
-            # dynamically get key containing 'l1'
-            mae_key = [k for k in cv_results.keys() if 'l1' in k][0]
-            return min(cv_results[mae_key])
-        study = optuna.create_study(direction='minimize')
-        study.optimize(objective, n_trials=n_trials)
-        return study.best_params
-
-    def tune_catboost(X, y, n_trials=20):
-        def objective(trial):
-            params = {
-                'iterations': trial.suggest_int('iterations', 100, 500),
-                'depth': trial.suggest_int('depth', 3, 10),
-                'learning_rate': trial.suggest_loguniform('learning_rate', 0.01, 0.3),
-                'loss_function': 'MAE',
-                'verbose': False,
-                'random_seed': 42
-            }
-            model = CatBoostRegressor(**params)
-            preds = cross_val_predict(model, X, y, cv=5, method='predict')
-            return mean_absolute_error(y, preds)
-        study = optuna.create_study(direction='minimize')
-        study.optimize(objective, n_trials=n_trials)
-        best_trial = study.best_trial
-        best_params = best_trial.params
-        best_params.update({'loss_function':'MAE','verbose':False,'random_seed':42})
-        return best_params
-
-    # --- Stacking with Ridge + LightGBM + CatBoost ---
-    print("Tuning Ridge Regression with Optuna...")
-    ridge_alpha = tune_ridge(X_train_top, y_train)
-    print(f"Best Ridge alpha: {ridge_alpha}")
-    print("Tuning LightGBM with Optuna...")
-    lgb_params = tune_lgb(X_train_top, y_train)
-    print(f"Best LightGBM params: {lgb_params}")
-    print("Tuning CatBoost with Optuna...")
-    cat_params = tune_catboost(X_train_top, y_train)
-    print(f"Best CatBoost params: {cat_params}")
-
-    ridge_final = Ridge(alpha=ridge_alpha, random_state=42)
-    lgb_final = lgb.LGBMRegressor(**lgb_params)
-    cat_final = CatBoostRegressor(**cat_params)
-
-    estimators = [
-        ('ridge', ridge_final),
-        ('lgb', lgb_final),
-        ('cat', cat_final)
-    ]
-
-    stacking_model = StackingRegressor(
-        estimators=estimators,
-        final_estimator=Ridge(alpha=1.0, random_state=42),
-        cv=5,
-        n_jobs=-1,
-        passthrough=True
-    )
-
-    stacking_model.fit(X_train_top, y_train)
-    stacking_preds = stacking_model.predict(X_test_top)
-    stacking_preds_rounded = np.round(stacking_preds).astype(int)
-    stacking_preds_rounded = np.clip(stacking_preds_rounded, 40, 120)
-
-    # Save stacking model submission
-    submission_stacking = pd.DataFrame({'ID': test_index, 'W': stacking_preds_rounded})
-    submission_stacking_path = os.path.join(submission_dir, 'submission_stacking.csv')
-    submission_stacking.to_csv(submission_stacking_path, index=False)
-    print(f"Saved stacking ensemble submission file to: {submission_stacking_path}")
-
-    print("Ridge, LightGBM tuning, and stacking ensemble pipeline finished successfully. Output files are saved.")
 
 if __name__ == "__main__":
     run_pipeline()
