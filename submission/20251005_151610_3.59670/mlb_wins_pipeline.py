@@ -246,55 +246,38 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     train['RD_eff'] = train['RD_per_game'] / (train['RPG']+1e-5)
     test['RD_eff'] = test['RD_per_game'] / (test['RPG']+1e-5)
 
-    # Era interaction features: RD_per_game × era flags, Pythag_W × era flags
-    era_cols = [col for col in train.columns if col.startswith('era_')]
-    for col in era_cols:
-        train[f'RD_per_game_{col}'] = train['RD_per_game'] * train[col]
-        test[f'RD_per_game_{col}'] = test['RD_per_game'] * test[col]
-        train[f'Pythag_W_{col}'] = train['Pythag_W'] * train[col]
-        test[f'Pythag_W_{col}'] = test['Pythag_W'] * test[col]
-
     # Target variable
     target_col = 'W'
 
-    # Define default features exactly as specified in DATA_DESCRIPTION.md
-    default_features = [
-        'yearID', 'teamID', 'lgID', 'G', 'W', 'L', 'R', 'AB', 'H', '2B', '3B', 'HR',
-        'BB', 'SO', 'SB', 'CS', 'HBP', 'SF', 'RA', 'ER', 'ERA', 'CG', 'SHO', 'SV',
-        'IP', 'HA', 'HRA', 'BBA', 'SOA', 'E', 'DP', 'FP', 'attendance', 'BPF', 'PPF',
-        'teamIDBR', 'teamIDlahman45', 'teamIDretro'
+
+    # --- Restrict features for modeling and stacking as per instructions ---
+    selected_features = [
+        'R', 'RA', 'ERA', 'SOA', 'HR', 'BB', 'SO', 'E', 'FP', 'RD_adj', 'RPG_norm', 'RD_eff', 'W_lag1'
     ]
+    # Ensure all selected features exist in both train and test
+    missing_train = [f for f in selected_features if f not in train.columns]
+    missing_test = [f for f in selected_features if f not in test.columns]
+    if missing_train:
+        print(f"WARNING: Missing columns in train: {missing_train}")
+    if missing_test:
+        print(f"WARNING: Missing columns in test: {missing_test}")
 
-    # Filter features to those present in both train and test
-    available_features = [f for f in default_features if f in train.columns and f in test.columns]
-
-    # Prepare training and test data
-    X_train = train[available_features].copy()
+    X_train = train[selected_features].copy()
     y_train = train[target_col].copy()
-    X_test = test[available_features].copy()
+    X_test = test[selected_features].copy()
 
-    # Identify one-hot encoded era and decade columns (if any)
-    # They start with 'era_' or 'decade_'
-    era_decade_cols = [col for col in X_train.columns if col.startswith('era_') or col.startswith('decade_')]
-    # Features to scale are those not in era_decade_cols
-    features_to_scale = [col for col in X_train.columns if col not in era_decade_cols]
+    # Fill NaNs for selected features
+    X_train = X_train.fillna(0)
+    X_test = X_test.fillna(0)
 
-    # Fill NaNs with 0 for scaling features
-    X_train[features_to_scale] = X_train[features_to_scale].fillna(0)
-    X_test[features_to_scale] = X_test[features_to_scale].fillna(0)
-
-    # For era_decade_cols fill NaNs with 0 as well (usually one-hot encoded, but just in case)
-    if era_decade_cols:
-        X_train[era_decade_cols] = X_train[era_decade_cols].fillna(0)
-        X_test[era_decade_cols] = X_test[era_decade_cols].fillna(0)
-
-    # Scale features except era and decade one-hot columns
+    # Scale all selected features (including RD_adj, RPG_norm, RD_eff, W_lag1)
     scaler = StandardScaler()
-    X_train_scaled = X_train.copy()
-    X_test_scaled = X_test.copy()
-
-    X_train_scaled[features_to_scale] = scaler.fit_transform(X_train[features_to_scale])
-    X_test_scaled[features_to_scale] = scaler.transform(X_test[features_to_scale])
+    X_train_scaled = pd.DataFrame(
+        scaler.fit_transform(X_train), columns=selected_features, index=X_train.index
+    )
+    X_test_scaled = pd.DataFrame(
+        scaler.transform(X_test), columns=selected_features, index=X_test.index
+    )
 
     # Train Linear Regression model
     lr = LinearRegression()
@@ -319,7 +302,7 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
 
     # Feature importance from Linear Regression coefficients
     coef_df = pd.DataFrame({
-        'feature': available_features,
+        'feature': selected_features,
         'coefficient': lr.coef_
     })
     coef_df['abs_coefficient'] = coef_df['coefficient'].abs()
@@ -391,80 +374,51 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
 
     print("Linear Regression pipeline finished successfully. Output files are saved.")
 
-    # --- Additional steps for Ridge and LightGBM feature importance and retraining ---
 
-    # Train Ridge regression on all features
+    # --- Ridge and LightGBM feature importance and retraining on selected features ---
+    # Train Ridge regression on selected features
     ridge = Ridge(alpha=1.0, random_state=42)
     ridge.fit(X_train_scaled, y_train)
     ridge_coefs = np.abs(ridge.coef_)
 
-    # Train LightGBM regressor on all features
+    # Train LightGBM regressor on selected features
     lgb_train = lgb.Dataset(X_train_scaled, label=y_train)
     params = {
         'objective': 'regression',
         'metric': 'l2',
         'verbosity': -1,  # Suppress warnings
         'seed': 42,
-        'force_row_wise': True  # For warning suppression and compatibility
+        'force_row_wise': True
     }
-    # Suppress LightGBM terminal warnings
     try:
         with lgb.basic.silent():
             lgb_model = lgb.train(params, lgb_train, num_boost_round=100)
     except AttributeError:
-        # For older LightGBM versions, fallback to direct call
         lgb_model = lgb.train(params, lgb_train, num_boost_round=100)
     lgb_importance = lgb_model.feature_importance(importance_type='gain')
     lgb_features = X_train_scaled.columns
-
     # Create DataFrame for feature importances
     ridge_imp_df = pd.DataFrame({'feature': X_train_scaled.columns, 'ridge_importance': ridge_coefs})
     lgb_imp_df = pd.DataFrame({'feature': lgb_features, 'lgb_importance': lgb_importance})
-
     # Merge importances
     combined_imp_df = pd.merge(ridge_imp_df, lgb_imp_df, on='feature', how='inner')
-
     # Normalize importances
     combined_imp_df['ridge_norm'] = combined_imp_df['ridge_importance'] / combined_imp_df['ridge_importance'].max()
     combined_imp_df['lgb_norm'] = combined_imp_df['lgb_importance'] / combined_imp_df['lgb_importance'].max()
-
     # Combined score as sum of normalized importances
     combined_imp_df['combined_score'] = combined_imp_df['ridge_norm'] + combined_imp_df['lgb_norm']
-
     # Sort by combined score descending
     combined_imp_df = combined_imp_df.sort_values(by='combined_score', ascending=False)
-
-    # Select top 12-15 features (choose 15)
-    top_features_count = 15
-    top_features = combined_imp_df.head(top_features_count)['feature'].tolist()
-
-    # Save combined top features to CSV
+    # Save combined features to CSV
     top_features_path = os.path.join(submission_dir, 'top_features_combined.csv')
-    combined_imp_df.head(top_features_count)[['feature', 'combined_score']].to_csv(top_features_path, index=False)
+    combined_imp_df[['feature', 'combined_score']].to_csv(top_features_path, index=False)
     print(f"Saved combined top features to: {top_features_path}")
 
-    # Prepare data with top features only
-    X_train_top = X_train_scaled[top_features]
-    X_test_top = X_test_scaled[top_features]
+    # Prepare data for stacking: use all selected features (already scaled)
+    X_train_top = X_train_scaled.copy()
+    X_test_top = X_test_scaled.copy()
 
-
-    # --- Scale lag and interaction features before stacking ---
-    # Identify lag and interaction features
-    lag_interaction_cols = [col for col in X_train_top.columns if 'lag' in col or 'RD' in col or 'Pythag' in col
-                            or col in [
-                                'RD_ERA','RD_FP','RDadj_FP','Pythag_ERA','Pythag_FP','Wlag1_RD','Wlag2_Pythag',
-                                'R_lag1_RA_lag1','RPG_ERA','HR_H','SO_BB_ratio','RAPG_SOA','RPG_norm','RD_eff'
-                            ]]
-    # Remove duplicates
-    lag_interaction_cols = list(dict.fromkeys(lag_interaction_cols))
-    if lag_interaction_cols:
-        scaler_lag = StandardScaler()
-        X_train_top[lag_interaction_cols] = scaler_lag.fit_transform(X_train_top[lag_interaction_cols])
-        X_test_top[lag_interaction_cols] = scaler_lag.transform(X_test_top[lag_interaction_cols])
-    else:
-        print("No lag or interaction features found to scale.")
-
-    # --- Define Optuna tuning functions ---
+    # --- Define Optuna tuning functions for Ridge and LightGBM ---
     def tune_ridge(X, y, n_trials=20):
         def objective(trial):
             alpha = trial.suggest_loguniform('alpha', 1e-3, 10)
@@ -494,52 +448,26 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
                 seed=42,
                 stratified=False
             )
-            # dynamically get key containing 'l1'
             mae_key = [k for k in cv_results.keys() if 'l1' in k][0]
             return min(cv_results[mae_key])
         study = optuna.create_study(direction='minimize')
         study.optimize(objective, n_trials=n_trials)
         return study.best_params
 
-    def tune_catboost(X, y, n_trials=20):
-        def objective(trial):
-            params = {
-                'iterations': trial.suggest_int('iterations', 100, 500),
-                'depth': trial.suggest_int('depth', 3, 10),
-                'learning_rate': trial.suggest_loguniform('learning_rate', 0.01, 0.3),
-                'loss_function': 'MAE',
-                'verbose': False,
-                'random_seed': 42
-            }
-            model = CatBoostRegressor(**params)
-            preds = cross_val_predict(model, X, y, cv=5, method='predict')
-            return mean_absolute_error(y, preds)
-        study = optuna.create_study(direction='minimize')
-        study.optimize(objective, n_trials=n_trials)
-        best_trial = study.best_trial
-        best_params = best_trial.params
-        best_params.update({'loss_function':'MAE','verbose':False,'random_seed':42})
-        return best_params
-
-    # --- Stacking with Ridge + LightGBM + CatBoost ---
+    # --- Stacking with Ridge + LightGBM (NO CatBoost) ---
     print("Tuning Ridge Regression with Optuna...")
     ridge_alpha = tune_ridge(X_train_top, y_train)
     print(f"Best Ridge alpha: {ridge_alpha}")
     print("Tuning LightGBM with Optuna...")
     lgb_params = tune_lgb(X_train_top, y_train)
     print(f"Best LightGBM params: {lgb_params}")
-    print("Tuning CatBoost with Optuna...")
-    cat_params = tune_catboost(X_train_top, y_train)
-    print(f"Best CatBoost params: {cat_params}")
 
     ridge_final = Ridge(alpha=ridge_alpha, random_state=42)
     lgb_final = lgb.LGBMRegressor(**lgb_params)
-    cat_final = CatBoostRegressor(**cat_params)
 
     estimators = [
         ('ridge', ridge_final),
-        ('lgb', lgb_final),
-        ('cat', cat_final)
+        ('lgb', lgb_final)
     ]
 
     stacking_model = StackingRegressor(
@@ -560,6 +488,31 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     submission_stacking_path = os.path.join(submission_dir, 'submission_stacking.csv')
     submission_stacking.to_csv(submission_stacking_path, index=False)
     print(f"Saved stacking ensemble submission file to: {submission_stacking_path}")
+
+    # OOF predictions for stacking and MAE by decade reporting
+    # Generate OOF predictions for stacking model
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    oof_preds = np.zeros(len(X_train_top))
+    for train_idx, val_idx in kf.split(X_train_top):
+        stacking_model.fit(X_train_top.iloc[train_idx], y_train.iloc[train_idx])
+        oof_preds[val_idx] = stacking_model.predict(X_train_top.iloc[val_idx])
+    oof_df_stacking = train[['yearID']].copy() if 'yearID' in train.columns else pd.DataFrame(index=train.index)
+    oof_df_stacking['W_actual'] = y_train
+    oof_df_stacking['W_pred'] = oof_preds
+    oof_df_stacking = oof_df_stacking.dropna(subset=['W_pred'])
+    oof_path_stacking = os.path.join(submission_dir, 'oof_predictions_stacking.csv')
+    oof_df_stacking.to_csv(oof_path_stacking, index=False)
+    print(f"Saved OOF predictions for stacking to: {oof_path_stacking}")
+    if 'yearID' in oof_df_stacking.columns:
+        oof_df_stacking['decade'] = (oof_df_stacking['yearID'] // 10) * 10
+        mae_by_decade = oof_df_stacking.groupby('decade').apply(
+            lambda x: mean_absolute_error(x['W_actual'], x['W_pred'])
+        )
+        print("Stacking OOF MAE by decade:")
+        print(mae_by_decade)
+        oof_mae_by_decade_path = os.path.join(submission_dir, 'oof_mae_by_decade.csv')
+        mae_by_decade.to_csv(oof_mae_by_decade_path)
+        print(f"Saved OOF MAE by decade to: {oof_mae_by_decade_path}")
 
     print("Ridge, LightGBM tuning, and stacking ensemble pipeline finished successfully. Output files are saved.")
 

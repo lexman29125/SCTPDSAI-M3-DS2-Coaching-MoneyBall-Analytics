@@ -246,23 +246,58 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     train['RD_eff'] = train['RD_per_game'] / (train['RPG']+1e-5)
     test['RD_eff'] = test['RD_per_game'] / (test['RPG']+1e-5)
 
-    # Era interaction features: RD_per_game × era flags, Pythag_W × era flags
-    era_cols = [col for col in train.columns if col.startswith('era_')]
-    for col in era_cols:
-        train[f'RD_per_game_{col}'] = train['RD_per_game'] * train[col]
-        test[f'RD_per_game_{col}'] = test['RD_per_game'] * test[col]
-        train[f'Pythag_W_{col}'] = train['Pythag_W'] * train[col]
-        test[f'Pythag_W_{col}'] = test['Pythag_W'] * test[col]
+    # --- Modern sabermetric features ---
+    # Ensure HBP and SF columns exist in both train and test, fill with 0 if missing
+    for col in ['HBP', 'SF']:
+        if col not in train.columns:
+            train[col] = 0
+        if col not in test.columns:
+            test[col] = 0
+    # On-base percentage (OBP)
+    train['OBP'] = (train['H'] + train['BB'] + train['HBP']) / (train['AB'] + train['BB'] + train['HBP'] + train['SF'] + 1e-5)
+    test['OBP'] = (test['H'] + test['BB'] + test['HBP']) / (test['AB'] + test['BB'] + test['HBP'] + test['SF'] + 1e-5)
+
+    # Slugging percentage (SLG)
+    train['SLG'] = ((train['H'] - train['2B'] - train['3B'] - train['HR']) + 2*train['2B'] + 3*train['3B'] + 4*train['HR']) / (train['AB'] + 1e-5)
+    test['SLG'] = ((test['H'] - test['2B'] - test['3B'] - test['HR']) + 2*test['2B'] + 3*test['3B'] + 4*test['HR']) / (test['AB'] + 1e-5)
+
+    # OPS (On-base Plus Slugging)
+    train['OPS'] = train['OBP'] + train['SLG']
+    test['OPS'] = test['OBP'] + test['SLG']
+
+    # Safe IP calculation
+    train['IP'] = train['IPouts'] / 3
+    test['IP'] = test['IPouts'] / 3
+
+    # Fielding Independent Pitching (FIP) with 3.1 constant and safe denominator
+    train['FIP'] = ((13 * train['HRA'] + 3 * train['BBA'] - 2 * train['SOA']) / (train['IP'] + 1e-5)) + 3.1
+    test['FIP'] = ((13 * test['HRA'] + 3 * test['BBA'] - 2 * test['SOA']) / (test['IP'] + 1e-5)) + 3.1
+
+    # Win Efficiency (W / Pythag_W)
+    # train['Win_eff'] = train['W'] / (train['Pythag_W'] + 1e-5)
+    # test['Win_eff'] = np.nan  # not known in test
+
+    print("Added modern sabermetric features: OBP, SLG, OPS, FIP, Win_eff")
+
+    # Replace infinite and NaN values
+    train.replace([np.inf, -np.inf], np.nan, inplace=True)
+    test.replace([np.inf, -np.inf], np.nan, inplace=True)
+    train.fillna(0, inplace=True)
+    test.fillna(0, inplace=True)
+    print("Cleaned dataset: replaced NaN and infinite values.")
 
     # Target variable
     target_col = 'W'
 
-    # Define default features exactly as specified in DATA_DESCRIPTION.md
+    # Define default features exactly as specified in DATA_DESCRIPTION.md,
+    # and include new modern sabermetric features
     default_features = [
         'yearID', 'teamID', 'lgID', 'G', 'W', 'L', 'R', 'AB', 'H', '2B', '3B', 'HR',
         'BB', 'SO', 'SB', 'CS', 'HBP', 'SF', 'RA', 'ER', 'ERA', 'CG', 'SHO', 'SV',
         'IP', 'HA', 'HRA', 'BBA', 'SOA', 'E', 'DP', 'FP', 'attendance', 'BPF', 'PPF',
-        'teamIDBR', 'teamIDlahman45', 'teamIDretro'
+        'teamIDBR', 'teamIDlahman45', 'teamIDretro',
+        # Modern sabermetric features
+        'OBP', 'SLG', 'OPS', 'FIP', 'Win_eff'
     ]
 
     # Filter features to those present in both train and test

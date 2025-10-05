@@ -246,14 +246,6 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     train['RD_eff'] = train['RD_per_game'] / (train['RPG']+1e-5)
     test['RD_eff'] = test['RD_per_game'] / (test['RPG']+1e-5)
 
-    # Era interaction features: RD_per_game × era flags, Pythag_W × era flags
-    era_cols = [col for col in train.columns if col.startswith('era_')]
-    for col in era_cols:
-        train[f'RD_per_game_{col}'] = train['RD_per_game'] * train[col]
-        test[f'RD_per_game_{col}'] = test['RD_per_game'] * test[col]
-        train[f'Pythag_W_{col}'] = train['Pythag_W'] * train[col]
-        test[f'Pythag_W_{col}'] = test['Pythag_W'] * test[col]
-
     # Target variable
     target_col = 'W'
 
@@ -562,6 +554,105 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     print(f"Saved stacking ensemble submission file to: {submission_stacking_path}")
 
     print("Ridge, LightGBM tuning, and stacking ensemble pipeline finished successfully. Output files are saved.")
+
+    # --- Feature Reference CSV Generation ---
+    # Collect all features used for modeling
+    # Core features: from default_features
+    core_features = [
+        'yearID', 'teamID', 'lgID', 'G', 'W', 'L', 'R', 'AB', 'H', '2B', '3B', 'HR',
+        'BB', 'SO', 'SB', 'CS', 'HBP', 'SF', 'RA', 'ER', 'ERA', 'CG', 'SHO', 'SV',
+        'IP', 'HA', 'HRA', 'BBA', 'SOA', 'E', 'DP', 'FP', 'attendance', 'BPF', 'PPF',
+        'teamIDBR', 'teamIDlahman45', 'teamIDretro'
+    ]
+    # Normalized features (scaling): features_to_scale
+    normalized_features = features_to_scale
+    # Lag features: those with 'lag' in name, e.g. 'W_lag1', 'W_lag2_mean', etc.
+    lag_features = []
+    for col in train.columns:
+        if ('lag' in col and col not in core_features):
+            lag_features.append(col)
+    # Interaction features: those created as products of other features
+    interaction_features = [
+        'Pythag_W_ERA','RD_per_game_FP','RD_ERA','RD_FP','RDadj_FP','Pythag_ERA','Pythag_FP','Wlag1_RD','Wlag2_Pythag',
+        'R_lag1_RA_lag1','RPG_ERA','HR_H','SO_BB_ratio','RAPG_SOA'
+    ]
+    # Derived features: new features made from others but not lag or interaction
+    derived_features = [
+        'run_diff','RPG','RAPG','RD_per_game','team_rpg','mlb_rpg','RD_adj','Pythag_W',
+        'SO_per_game','BB_per_game','H_per_game','HR_per_game','SOA_per_game','RA_per_game',
+        'RPG_norm','RD_eff'
+    ]
+    # Remove duplicates and keep order
+    def unique_preserve(seq):
+        seen = set()
+        out = []
+        for x in seq:
+            if x not in seen:
+                out.append(x)
+                seen.add(x)
+        return out
+
+    # Combine all features used in modeling (union of all, as some may overlap)
+    all_features = (
+        core_features +
+        normalized_features +
+        lag_features +
+        interaction_features +
+        derived_features
+    )
+    all_features = unique_preserve(all_features)
+    # Only keep those present in train/test (robustness)
+    all_features = [f for f in all_features if f in train.columns or f in test.columns]
+
+    # Map feature to type
+    feature_type_map = {}
+    for f in all_features:
+        if f in core_features:
+            feature_type_map[f] = 'core'
+        elif f in normalized_features:
+            feature_type_map[f] = 'normalized'
+        elif f in lag_features:
+            feature_type_map[f] = 'lag'
+        elif f in interaction_features:
+            feature_type_map[f] = 'interaction'
+        elif f in derived_features:
+            feature_type_map[f] = 'derived'
+        else:
+            feature_type_map[f] = 'other'
+
+    # Approximate line references for where features are created
+    # (These are rough, based on the pipeline structure)
+    line_refs = {
+        # Core features: loaded from file (lines 10-40)
+        'core': '10-40',
+        # Normalized features: scaling (lines 180-200)
+        'normalized': '180-200',
+        # Lag features: lag features (lines 30-80 and 130-170)
+        'lag': '30-80, 130-170',
+        # Interaction features: interaction feature engineering (lines 170-220)
+        'interaction': '170-220',
+        # Derived features: feature engineering (lines 80-170)
+        'derived': '80-170',
+        # Other: unknown
+        'other': '-'
+    }
+    # Assign line reference for each feature
+    feature_line_ref = []
+    for f in all_features:
+        ftype = feature_type_map.get(f, 'other')
+        feature_line_ref.append(line_refs.get(ftype, '-'))
+
+    # Compose dataframe
+    feature_ref_df = pd.DataFrame({
+        'feature': all_features,
+        'type': [feature_type_map.get(f, 'other') for f in all_features],
+        'line_reference': feature_line_ref
+    })
+
+    # Save to CSV
+    feature_reference_path = os.path.join(submission_dir, 'feature_reference.csv')
+    feature_ref_df.to_csv(feature_reference_path, index=False)
+    print(f"Feature reference CSV saved to: {feature_reference_path}")
 
 if __name__ == "__main__":
     run_pipeline()

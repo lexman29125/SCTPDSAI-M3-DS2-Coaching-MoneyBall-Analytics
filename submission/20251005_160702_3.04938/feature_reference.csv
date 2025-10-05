@@ -1,0 +1,67 @@
+feature,type,line_reference
+yearID,core,10-40
+teamID,core,10-40
+G,core,10-40
+W,core,10-40
+R,core,10-40
+AB,core,10-40
+H,core,10-40
+2B,core,10-40
+3B,core,10-40
+HR,core,10-40
+BB,core,10-40
+SO,core,10-40
+SB,core,10-40
+RA,core,10-40
+ER,core,10-40
+ERA,core,10-40
+CG,core,10-40
+SHO,core,10-40
+SV,core,10-40
+IP,core,10-40
+HA,core,10-40
+HRA,core,10-40
+BBA,core,10-40
+SOA,core,10-40
+E,core,10-40
+DP,core,10-40
+FP,core,10-40
+W_lag2_mean,lag,"30-80, 130-170"
+R_lag2_mean,lag,"30-80, 130-170"
+RA_lag2_mean,lag,"30-80, 130-170"
+W_lag1,lag,"30-80, 130-170"
+R_lag1,lag,"30-80, 130-170"
+RA_lag1,lag,"30-80, 130-170"
+W_lag1_missing,lag,"30-80, 130-170"
+R_lag1_missing,lag,"30-80, 130-170"
+RA_lag1_missing,lag,"30-80, 130-170"
+Wlag1_RD,lag,"30-80, 130-170"
+Wlag2_Pythag,lag,"30-80, 130-170"
+R_lag1_RA_lag1,lag,"30-80, 130-170"
+Pythag_W_ERA,interaction,170-220
+RD_per_game_FP,interaction,170-220
+RD_ERA,interaction,170-220
+RD_FP,interaction,170-220
+RDadj_FP,interaction,170-220
+Pythag_ERA,interaction,170-220
+Pythag_FP,interaction,170-220
+RPG_ERA,interaction,170-220
+HR_H,interaction,170-220
+SO_BB_ratio,interaction,170-220
+RAPG_SOA,interaction,170-220
+run_diff,derived,80-170
+RPG,derived,80-170
+RAPG,derived,80-170
+RD_per_game,derived,80-170
+team_rpg,derived,80-170
+mlb_rpg,derived,80-170
+RD_adj,derived,80-170
+Pythag_W,derived,80-170
+SO_per_game,derived,80-170
+BB_per_game,derived,80-170
+H_per_game,derived,80-170
+HR_per_game,derived,80-170
+SOA_per_game,derived,80-170
+RA_per_game,derived,80-170
+RPG_norm,derived,80-170
+RD_eff,derived,80-170
