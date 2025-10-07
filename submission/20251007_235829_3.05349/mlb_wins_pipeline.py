@@ -309,6 +309,13 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     submission_dir = os.path.join('submission', timestamp)
     os.makedirs(submission_dir, exist_ok=True)
 
+    # --- Copy current pipeline file to output folder for reproducibility ---
+    import shutil
+    current_script_path = os.path.realpath(__file__)
+    script_copy_path = os.path.join(submission_dir, 'mlb_wins_pipeline.py')
+    shutil.copy2(current_script_path, script_copy_path)
+    print(f"Copied pipeline script to: {script_copy_path}")
+
     # Feature importance from Linear Regression coefficients
     coef_df = pd.DataFrame({
         'feature': available_features,
@@ -350,6 +357,12 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
         )
         print("Linear Regression training MAE by decade:")
         print(mae_by_decade)
+        # Save MAE by decade to CSV in output folder
+        mae_by_decade_df = mae_by_decade.reset_index()
+        mae_by_decade_df.columns = ['decade', 'MAE']
+        mae_by_decade_path = os.path.join(submission_dir, 'oof_mae_by_decade.csv')
+        mae_by_decade_df.to_csv(mae_by_decade_path, index=False)
+        print(f"Saved MAE by decade to: {mae_by_decade_path}")
 
     # Plot predicted vs actual wins (training data)
     plt.figure(figsize=(8, 8))

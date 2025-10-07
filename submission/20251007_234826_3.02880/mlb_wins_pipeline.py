@@ -196,56 +196,6 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     train['RD_per_game_FP'] = train['RD_per_game'] * train['FP']
     test['RD_per_game_FP'] = test['RD_per_game'] * test['FP']
 
-    # --- New advanced interaction features ---
-    # Ensure all needed columns exist in both train and test
-    for col in ['RD_per_game','ERA','FP','RD_adj','Pythag_W','W_lag1','W_lag2_mean','R_lag1','RA_lag1','RPG','HR_per_game','H_per_game','SO_per_game','BB_per_game','SOA_per_game','RA_per_game','mlb_rpg','G']:
-        if col not in train.columns:
-            train[col] = np.nan
-        if col not in test.columns:
-            test[col] = np.nan
-
-    train['RD_ERA'] = train['RD_per_game'] * train['ERA']
-    test['RD_ERA'] = test['RD_per_game'] * test['ERA']
-
-    train['RD_FP'] = train['RD_per_game'] * train['FP']
-    test['RD_FP'] = test['RD_per_game'] * test['FP']
-
-    train['RDadj_FP'] = train['RD_adj'] * train['FP']
-    test['RDadj_FP'] = test['RD_adj'] * test['FP']
-
-    train['Pythag_ERA'] = train['Pythag_W'] * train['ERA']
-    test['Pythag_ERA'] = test['Pythag_W'] * test['ERA']
-
-    train['Pythag_FP'] = train['Pythag_W'] * train['FP']
-    test['Pythag_FP'] = test['Pythag_W'] * test['FP']
-
-    train['Wlag1_RD'] = train['W_lag1'] * train['RD_per_game']
-    test['Wlag1_RD'] = test['W_lag1'] * test['RD_per_game']
-
-    train['Wlag2_Pythag'] = train['W_lag2_mean'] * train['Pythag_W']
-    test['Wlag2_Pythag'] = test['W_lag2_mean'] * test['Pythag_W']
-
-    train['R_lag1_RA_lag1'] = train['R_lag1'] * train['RA_lag1']
-    test['R_lag1_RA_lag1'] = test['R_lag1'] * test['RA_lag1']
-
-    train['RPG_ERA'] = train['RPG'] * train['ERA']
-    test['RPG_ERA'] = test['RPG'] * test['ERA']
-
-    train['HR_H'] = train['HR_per_game'] * train['H_per_game']
-    test['HR_H'] = test['HR_per_game'] * test['H_per_game']
-
-    train['SO_BB_ratio'] = train['SO_per_game'] / (train['BB_per_game']+1e-5)
-    test['SO_BB_ratio'] = test['SO_per_game'] / (test['BB_per_game']+1e-5)
-
-    train['RAPG_SOA'] = train['RA_per_game'] * train['SOA_per_game']
-    test['RAPG_SOA'] = test['RA_per_game'] * test['SOA_per_game']
-
-    train['RPG_norm'] = train['RPG'] / train['mlb_rpg']
-    test['RPG_norm'] = test['RPG'] / test['mlb_rpg']
-
-    train['RD_eff'] = train['RD_per_game'] / (train['RPG']+1e-5)
-    test['RD_eff'] = test['RD_per_game'] / (test['RPG']+1e-5)
-
     # Target variable
     target_col = 'W'
 
@@ -308,6 +258,14 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     submission_dir = os.path.join('submission', timestamp)
     os.makedirs(submission_dir, exist_ok=True)
+    # Copy the current script file into the output folder
+    import shutil, sys
+    current_script = os.path.abspath(__file__) if '__file__' in globals() else sys.argv[0]
+    try:
+        shutil.copy(current_script, os.path.join(submission_dir, os.path.basename(current_script)))
+        print(f"Copied pipeline script to output folder: {os.path.join(submission_dir, os.path.basename(current_script))}")
+    except Exception as e:
+        print(f"Warning: Failed to copy pipeline script to output folder: {e}")
 
     # Feature importance from Linear Regression coefficients
     coef_df = pd.DataFrame({
@@ -350,6 +308,10 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
         )
         print("Linear Regression training MAE by decade:")
         print(mae_by_decade)
+        # Save OOF MAE by decade to CSV in the output folder
+        oof_mae_by_decade_path = os.path.join(submission_dir, 'oof_mae_by_decade.csv')
+        mae_by_decade.to_csv(oof_mae_by_decade_path, header=['mae'])
+        print(f"Saved OOF MAE by decade to: {oof_mae_by_decade_path}")
 
     # Plot predicted vs actual wins (training data)
     plt.figure(figsize=(8, 8))
@@ -442,13 +404,7 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
 
     # --- Scale lag and interaction features before stacking ---
     # Identify lag and interaction features
-    lag_interaction_cols = [col for col in X_train_top.columns if 'lag' in col or 'RD' in col or 'Pythag' in col
-                            or col in [
-                                'RD_ERA','RD_FP','RDadj_FP','Pythag_ERA','Pythag_FP','Wlag1_RD','Wlag2_Pythag',
-                                'R_lag1_RA_lag1','RPG_ERA','HR_H','SO_BB_ratio','RAPG_SOA','RPG_norm','RD_eff'
-                            ]]
-    # Remove duplicates
-    lag_interaction_cols = list(dict.fromkeys(lag_interaction_cols))
+    lag_interaction_cols = [col for col in X_train_top.columns if 'lag' in col or 'RD' in col or 'Pythag' in col]
     if lag_interaction_cols:
         scaler_lag = StandardScaler()
         X_train_top[lag_interaction_cols] = scaler_lag.fit_transform(X_train_top[lag_interaction_cols])

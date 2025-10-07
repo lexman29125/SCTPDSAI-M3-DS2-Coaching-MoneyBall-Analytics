@@ -246,47 +246,131 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     train['RD_eff'] = train['RD_per_game'] / (train['RPG']+1e-5)
     test['RD_eff'] = test['RD_per_game'] / (test['RPG']+1e-5)
 
+    # Era interaction features: RD_per_game × era flags, Pythag_W × era flags
+    era_cols = [col for col in train.columns if col.startswith('era_')]
+    for col in era_cols:
+        train[f'RD_per_game_{col}'] = train['RD_per_game'] * train[col]
+        test[f'RD_per_game_{col}'] = test['RD_per_game'] * test[col]
+        train[f'Pythag_W_{col}'] = train['Pythag_W'] * train[col]
+        test[f'Pythag_W_{col}'] = test['Pythag_W'] * test[col]
+
     # Target variable
     target_col = 'W'
 
-    # Define default features exactly as specified in DATA_DESCRIPTION.md
-    default_features = [
-        'yearID', 'teamID', 'lgID', 'G', 'W', 'L', 'R', 'AB', 'H', '2B', '3B', 'HR',
-        'BB', 'SO', 'SB', 'CS', 'HBP', 'SF', 'RA', 'ER', 'ERA', 'CG', 'SHO', 'SV',
-        'IP', 'HA', 'HRA', 'BBA', 'SOA', 'E', 'DP', 'FP', 'attendance', 'BPF', 'PPF',
-        'teamIDBR', 'teamIDlahman45', 'teamIDretro'
+    # --- Top sabermetric and classical "heavy hitters" feature set ---
+    # Reintroduce classical "heavy hitters": R, RA, ER, alongside top 10 sabermetric features.
+    # All other features already present (lag features, interaction terms, era/decade dummies) are retained.
+
+    # Ensure all features exist; compute if missing
+    def compute_OBP(df):
+        # OBP = (H + BB + HBP) / (AB + BB + HBP + SF)
+        h = df['H'] if 'H' in df else 0
+        bb = df['BB'] if 'BB' in df else 0
+        hbp = df['HBP'] if 'HBP' in df else 0
+        ab = df['AB'] if 'AB' in df else 0
+        sf = df['SF'] if 'SF' in df else 0
+        denom = ab + bb + hbp + sf
+        return (h + bb + hbp) / denom.replace(0, np.nan)
+
+    def compute_SLG(df):
+        # SLG = (1B + 2*2B + 3*3B + 4*HR) / AB
+        h = df['H'] if 'H' in df else 0
+        _2b = df['2B'] if '2B' in df else 0
+        _3b = df['3B'] if '3B' in df else 0
+        hr = df['HR'] if 'HR' in df else 0
+        ab = df['AB'] if 'AB' in df else 0
+        singles = h - _2b - _3b - hr
+        num = singles + 2*_2b + 3*_3b + 4*hr
+        return num / ab.replace(0, np.nan)
+
+    for df in [train, test]:
+        # OPS
+        if 'OPS' not in df.columns:
+            if all(col in df.columns for col in ['H', 'BB', 'HBP', 'AB', 'SF', '2B', '3B', 'HR']):
+                df['OBP'] = compute_OBP(df)
+                df['SLG'] = compute_SLG(df)
+                df['OPS'] = df['OBP'] + df['SLG']
+            else:
+                df['OPS'] = np.nan
+        # OBP
+        if 'OBP' not in df.columns:
+            if all(col in df.columns for col in ['H', 'BB', 'HBP', 'AB', 'SF']):
+                df['OBP'] = compute_OBP(df)
+            else:
+                df['OBP'] = np.nan
+        # FIP
+        if 'FIP' not in df.columns:
+            # FIP = (13*HR + 3*BB + 2*HBP - 2*SO) / IP + constant (constant can be omitted for modeling)
+            for col in ['HR', 'BB', 'HBP', 'SO', 'IP']:
+                if col not in df.columns:
+                    df[col] = np.nan
+            df['FIP'] = (13*df['HR'] + 3*df['BB'] + 2*df['HBP'] - 2*df['SO']) / (df['IP'].replace(0, np.nan))
+        # RA_per_game
+        if 'RA_per_game' not in df.columns:
+            if 'RA' in df.columns and 'G' in df.columns:
+                df['RA_per_game'] = df['RA'] / df['G']
+            else:
+                df['RA_per_game'] = np.nan
+
+    # Compose final feature set: heavy hitters + top sabermetric features + all lags/interactions/era/decade dummies
+    # 1. Heavy hitters: R, RA, ER
+    classical_heavy_hitters = ['R', 'RA', 'ER']
+    # 2. Top 10 sabermetric features (as previously)
+    sabermetric_features = [
+        'RPG', 'OPS', 'OBP',        # offensive
+        'ERA', 'FIP', 'RA_per_game',# run prevention
+        'RD_per_game', 'RD_adj',    # differential
+        'SOA', 'BBA',               # pitching control
+        'E', 'FP',                  # fielding
     ]
 
-    # Filter features to those present in both train and test
-    available_features = [f for f in default_features if f in train.columns and f in test.columns]
+    # Add lag/interaction/era/decade features if present
+    lag_interaction_cols = []
+    for col in train.columns:
+        if (
+            ('lag' in col and col not in sabermetric_features and col not in classical_heavy_hitters)
+            or ('RD' in col and col not in sabermetric_features and col not in classical_heavy_hitters)
+            or ('Pythag' in col)
+            or ('_FP' in col or '_ERA' in col)
+            or ('_norm' in col)
+            or ('_eff' in col)
+        ):
+            lag_interaction_cols.append(col)
+    # Era/decade dummies
+    era_decade_cols = [col for col in train.columns if col.startswith('era_') or col.startswith('decade_')]
+
+    # Only include lag/interaction/era/decade columns that are present in both train and test
+    lag_interaction_cols = [col for col in lag_interaction_cols if col in test.columns]
+    era_decade_cols = [col for col in era_decade_cols if col in test.columns]
+
+    # Only include features present in both train and test
+    final_features = []
+    # Add classical heavy hitters
+    final_features += [f for f in classical_heavy_hitters if f in train.columns and f in test.columns]
+    # Add sabermetric features
+    final_features += [f for f in sabermetric_features if f in train.columns and f in test.columns]
+    # Add lag/interactions
+    final_features += lag_interaction_cols
+    # Add era/decade dummies
+    final_features += era_decade_cols
 
     # Prepare training and test data
-    X_train = train[available_features].copy()
+    X_train = train[final_features].copy()
     y_train = train[target_col].copy()
-    X_test = test[available_features].copy()
+    X_test = test[final_features].copy()
 
-    # Identify one-hot encoded era and decade columns (if any)
-    # They start with 'era_' or 'decade_'
-    era_decade_cols = [col for col in X_train.columns if col.startswith('era_') or col.startswith('decade_')]
-    # Features to scale are those not in era_decade_cols
-    features_to_scale = [col for col in X_train.columns if col not in era_decade_cols]
+    # Fill NaNs with 0 for all features
+    X_train = X_train.fillna(0)
+    X_test = X_test.fillna(0)
 
-    # Fill NaNs with 0 for scaling features
-    X_train[features_to_scale] = X_train[features_to_scale].fillna(0)
-    X_test[features_to_scale] = X_test[features_to_scale].fillna(0)
-
-    # For era_decade_cols fill NaNs with 0 as well (usually one-hot encoded, but just in case)
-    if era_decade_cols:
-        X_train[era_decade_cols] = X_train[era_decade_cols].fillna(0)
-        X_test[era_decade_cols] = X_test[era_decade_cols].fillna(0)
-
-    # Scale features except era and decade one-hot columns
+    # Scale all features
     scaler = StandardScaler()
-    X_train_scaled = X_train.copy()
-    X_test_scaled = X_test.copy()
-
-    X_train_scaled[features_to_scale] = scaler.fit_transform(X_train[features_to_scale])
-    X_test_scaled[features_to_scale] = scaler.transform(X_test[features_to_scale])
+    X_train_scaled = pd.DataFrame(
+        scaler.fit_transform(X_train), columns=X_train.columns, index=X_train.index
+    )
+    X_test_scaled = pd.DataFrame(
+        scaler.transform(X_test), columns=X_test.columns, index=X_test.index
+    )
 
     # Train Linear Regression model
     lr = LinearRegression()
@@ -311,7 +395,7 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
 
     # Feature importance from Linear Regression coefficients
     coef_df = pd.DataFrame({
-        'feature': available_features,
+        'feature': X_train.columns,
         'coefficient': lr.coef_
     })
     coef_df['abs_coefficient'] = coef_df['coefficient'].abs()
@@ -384,77 +468,9 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     print("Linear Regression pipeline finished successfully. Output files are saved.")
 
     # --- Additional steps for Ridge and LightGBM feature importance and retraining ---
-
-    # Train Ridge regression on all features
-    ridge = Ridge(alpha=1.0, random_state=42)
-    ridge.fit(X_train_scaled, y_train)
-    ridge_coefs = np.abs(ridge.coef_)
-
-    # Train LightGBM regressor on all features
-    lgb_train = lgb.Dataset(X_train_scaled, label=y_train)
-    params = {
-        'objective': 'regression',
-        'metric': 'l2',
-        'verbosity': -1,  # Suppress warnings
-        'seed': 42,
-        'force_row_wise': True  # For warning suppression and compatibility
-    }
-    # Suppress LightGBM terminal warnings
-    try:
-        with lgb.basic.silent():
-            lgb_model = lgb.train(params, lgb_train, num_boost_round=100)
-    except AttributeError:
-        # For older LightGBM versions, fallback to direct call
-        lgb_model = lgb.train(params, lgb_train, num_boost_round=100)
-    lgb_importance = lgb_model.feature_importance(importance_type='gain')
-    lgb_features = X_train_scaled.columns
-
-    # Create DataFrame for feature importances
-    ridge_imp_df = pd.DataFrame({'feature': X_train_scaled.columns, 'ridge_importance': ridge_coefs})
-    lgb_imp_df = pd.DataFrame({'feature': lgb_features, 'lgb_importance': lgb_importance})
-
-    # Merge importances
-    combined_imp_df = pd.merge(ridge_imp_df, lgb_imp_df, on='feature', how='inner')
-
-    # Normalize importances
-    combined_imp_df['ridge_norm'] = combined_imp_df['ridge_importance'] / combined_imp_df['ridge_importance'].max()
-    combined_imp_df['lgb_norm'] = combined_imp_df['lgb_importance'] / combined_imp_df['lgb_importance'].max()
-
-    # Combined score as sum of normalized importances
-    combined_imp_df['combined_score'] = combined_imp_df['ridge_norm'] + combined_imp_df['lgb_norm']
-
-    # Sort by combined score descending
-    combined_imp_df = combined_imp_df.sort_values(by='combined_score', ascending=False)
-
-    # Select top 12-15 features (choose 15)
-    top_features_count = 15
-    top_features = combined_imp_df.head(top_features_count)['feature'].tolist()
-
-    # Save combined top features to CSV
-    top_features_path = os.path.join(submission_dir, 'top_features_combined.csv')
-    combined_imp_df.head(top_features_count)[['feature', 'combined_score']].to_csv(top_features_path, index=False)
-    print(f"Saved combined top features to: {top_features_path}")
-
-    # Prepare data with top features only
-    X_train_top = X_train_scaled[top_features]
-    X_test_top = X_test_scaled[top_features]
-
-
-    # --- Scale lag and interaction features before stacking ---
-    # Identify lag and interaction features
-    lag_interaction_cols = [col for col in X_train_top.columns if 'lag' in col or 'RD' in col or 'Pythag' in col
-                            or col in [
-                                'RD_ERA','RD_FP','RDadj_FP','Pythag_ERA','Pythag_FP','Wlag1_RD','Wlag2_Pythag',
-                                'R_lag1_RA_lag1','RPG_ERA','HR_H','SO_BB_ratio','RAPG_SOA','RPG_norm','RD_eff'
-                            ]]
-    # Remove duplicates
-    lag_interaction_cols = list(dict.fromkeys(lag_interaction_cols))
-    if lag_interaction_cols:
-        scaler_lag = StandardScaler()
-        X_train_top[lag_interaction_cols] = scaler_lag.fit_transform(X_train_top[lag_interaction_cols])
-        X_test_top[lag_interaction_cols] = scaler_lag.transform(X_test_top[lag_interaction_cols])
-    else:
-        print("No lag or interaction features found to scale.")
+    # For the refined feature set, use all features for stacking (no further selection)
+    X_train_top = X_train_scaled
+    X_test_top = X_test_scaled
 
     # --- Define Optuna tuning functions ---
     def tune_ridge(X, y, n_trials=20):

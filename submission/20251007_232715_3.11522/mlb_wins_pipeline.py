@@ -196,95 +196,51 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     train['RD_per_game_FP'] = train['RD_per_game'] * train['FP']
     test['RD_per_game_FP'] = test['RD_per_game'] * test['FP']
 
-    # --- New advanced interaction features ---
-    # Ensure all needed columns exist in both train and test
-    for col in ['RD_per_game','ERA','FP','RD_adj','Pythag_W','W_lag1','W_lag2_mean','R_lag1','RA_lag1','RPG','HR_per_game','H_per_game','SO_per_game','BB_per_game','SOA_per_game','RA_per_game','mlb_rpg','G']:
-        if col not in train.columns:
-            train[col] = np.nan
-        if col not in test.columns:
-            test[col] = np.nan
-
-    train['RD_ERA'] = train['RD_per_game'] * train['ERA']
-    test['RD_ERA'] = test['RD_per_game'] * test['ERA']
-
-    train['RD_FP'] = train['RD_per_game'] * train['FP']
-    test['RD_FP'] = test['RD_per_game'] * test['FP']
-
-    train['RDadj_FP'] = train['RD_adj'] * train['FP']
-    test['RDadj_FP'] = test['RD_adj'] * test['FP']
-
-    train['Pythag_ERA'] = train['Pythag_W'] * train['ERA']
-    test['Pythag_ERA'] = test['Pythag_W'] * test['ERA']
-
-    train['Pythag_FP'] = train['Pythag_W'] * train['FP']
-    test['Pythag_FP'] = test['Pythag_W'] * test['FP']
-
-    train['Wlag1_RD'] = train['W_lag1'] * train['RD_per_game']
-    test['Wlag1_RD'] = test['W_lag1'] * test['RD_per_game']
-
-    train['Wlag2_Pythag'] = train['W_lag2_mean'] * train['Pythag_W']
-    test['Wlag2_Pythag'] = test['W_lag2_mean'] * test['Pythag_W']
-
-    train['R_lag1_RA_lag1'] = train['R_lag1'] * train['RA_lag1']
-    test['R_lag1_RA_lag1'] = test['R_lag1'] * test['RA_lag1']
-
-    train['RPG_ERA'] = train['RPG'] * train['ERA']
-    test['RPG_ERA'] = test['RPG'] * test['ERA']
-
-    train['HR_H'] = train['HR_per_game'] * train['H_per_game']
-    test['HR_H'] = test['HR_per_game'] * test['H_per_game']
-
-    train['SO_BB_ratio'] = train['SO_per_game'] / (train['BB_per_game']+1e-5)
-    test['SO_BB_ratio'] = test['SO_per_game'] / (test['BB_per_game']+1e-5)
-
-    train['RAPG_SOA'] = train['RA_per_game'] * train['SOA_per_game']
-    test['RAPG_SOA'] = test['RA_per_game'] * test['SOA_per_game']
-
-    train['RPG_norm'] = train['RPG'] / train['mlb_rpg']
-    test['RPG_norm'] = test['RPG'] / test['mlb_rpg']
-
-    train['RD_eff'] = train['RD_per_game'] / (train['RPG']+1e-5)
-    test['RD_eff'] = test['RD_per_game'] / (test['RPG']+1e-5)
-
     # Target variable
     target_col = 'W'
 
-    # Define default features exactly as specified in DATA_DESCRIPTION.md
-    default_features = [
-        'yearID', 'teamID', 'lgID', 'G', 'W', 'L', 'R', 'AB', 'H', '2B', '3B', 'HR',
-        'BB', 'SO', 'SB', 'CS', 'HBP', 'SF', 'RA', 'ER', 'ERA', 'CG', 'SHO', 'SV',
-        'IP', 'HA', 'HRA', 'BBA', 'SOA', 'E', 'DP', 'FP', 'attendance', 'BPF', 'PPF',
-        'teamIDBR', 'teamIDlahman45', 'teamIDretro'
+    # --- Enforce BASE features as per baseball experts ---
+    base_features = [
+        'R', 'OBP', 'OPS', 'BB', 'RA', 'ERA', 'SOA', 'BBA', 'RD', 'RD_per_game', 'RD_adj', 'Pythag_W', 'E', 'FP'
     ]
+    # Only include base features that are present in both train and test
+    present_base_features = [f for f in base_features if f in train.columns and f in test.columns]
 
-    # Filter features to those present in both train and test
-    available_features = [f for f in default_features if f in train.columns and f in test.columns]
+    # Collect all other features (including lag, interaction, era/decade dummies)
+    # Use all columns in train/test except target, and enforce base features
+    all_candidate_features = [col for col in train.columns
+                              if col != target_col and col in test.columns]
+
+    # Identify one-hot encoded era and decade columns (if any)
+    era_decade_cols = [col for col in all_candidate_features if col.startswith('era_') or col.startswith('decade_')]
+
+    # Compose available features: always include present_base_features, and add any other features (including lag, interaction, era/decade) not already in base
+    available_features = []
+    for f in present_base_features:
+        if f not in available_features:
+            available_features.append(f)
+    for f in all_candidate_features:
+        if f not in available_features:
+            available_features.append(f)
 
     # Prepare training and test data
     X_train = train[available_features].copy()
     y_train = train[target_col].copy()
     X_test = test[available_features].copy()
 
-    # Identify one-hot encoded era and decade columns (if any)
-    # They start with 'era_' or 'decade_'
-    era_decade_cols = [col for col in X_train.columns if col.startswith('era_') or col.startswith('decade_')]
-    # Features to scale are those not in era_decade_cols
+    # Features to scale: all numeric features except one-hot era/decade columns
     features_to_scale = [col for col in X_train.columns if col not in era_decade_cols]
-
     # Fill NaNs with 0 for scaling features
     X_train[features_to_scale] = X_train[features_to_scale].fillna(0)
     X_test[features_to_scale] = X_test[features_to_scale].fillna(0)
-
     # For era_decade_cols fill NaNs with 0 as well (usually one-hot encoded, but just in case)
     if era_decade_cols:
         X_train[era_decade_cols] = X_train[era_decade_cols].fillna(0)
         X_test[era_decade_cols] = X_test[era_decade_cols].fillna(0)
-
-    # Scale features except era and decade one-hot columns
+    # Scale numeric features (including base features)
     scaler = StandardScaler()
     X_train_scaled = X_train.copy()
     X_test_scaled = X_test.copy()
-
     X_train_scaled[features_to_scale] = scaler.fit_transform(X_train[features_to_scale])
     X_test_scaled[features_to_scale] = scaler.transform(X_test[features_to_scale])
 
@@ -426,29 +382,36 @@ def run_pipeline(train_path='assets/train.csv', test_path='assets/test.csv'):
     # Sort by combined score descending
     combined_imp_df = combined_imp_df.sort_values(by='combined_score', ascending=False)
 
-    # Select top 12-15 features (choose 15)
+    # Select top 12-15 features (choose 15), but ALWAYS include all present_base_features
     top_features_count = 15
-    top_features = combined_imp_df.head(top_features_count)['feature'].tolist()
+    # Start with all present_base_features, then add top features from combined_imp_df that are not already in base
+    top_features = []
+    for f in present_base_features:
+        if f in combined_imp_df['feature'].values and f not in top_features:
+            top_features.append(f)
+    # Now add features from combined_imp_df in order, skipping any already in top_features
+    for f in combined_imp_df['feature']:
+        if f not in top_features:
+            top_features.append(f)
+        if len(top_features) >= top_features_count:
+            break
+    # Guarantee all present_base_features are included, even if over top_features_count
+    for f in present_base_features:
+        if f not in top_features:
+            top_features.append(f)
 
     # Save combined top features to CSV
     top_features_path = os.path.join(submission_dir, 'top_features_combined.csv')
-    combined_imp_df.head(top_features_count)[['feature', 'combined_score']].to_csv(top_features_path, index=False)
+    combined_imp_df[combined_imp_df['feature'].isin(top_features)][['feature', 'combined_score']].to_csv(top_features_path, index=False)
     print(f"Saved combined top features to: {top_features_path}")
 
-    # Prepare data with top features only
+    # Prepare data with top features only (always includes all base features)
     X_train_top = X_train_scaled[top_features]
     X_test_top = X_test_scaled[top_features]
 
-
     # --- Scale lag and interaction features before stacking ---
     # Identify lag and interaction features
-    lag_interaction_cols = [col for col in X_train_top.columns if 'lag' in col or 'RD' in col or 'Pythag' in col
-                            or col in [
-                                'RD_ERA','RD_FP','RDadj_FP','Pythag_ERA','Pythag_FP','Wlag1_RD','Wlag2_Pythag',
-                                'R_lag1_RA_lag1','RPG_ERA','HR_H','SO_BB_ratio','RAPG_SOA','RPG_norm','RD_eff'
-                            ]]
-    # Remove duplicates
-    lag_interaction_cols = list(dict.fromkeys(lag_interaction_cols))
+    lag_interaction_cols = [col for col in X_train_top.columns if 'lag' in col or 'RD' in col or 'Pythag' in col]
     if lag_interaction_cols:
         scaler_lag = StandardScaler()
         X_train_top[lag_interaction_cols] = scaler_lag.fit_transform(X_train_top[lag_interaction_cols])
